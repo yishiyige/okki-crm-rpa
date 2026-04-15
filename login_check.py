@@ -45,7 +45,7 @@ async def check_login_status(page):
         print(" 登录成功并看到【主页/工作台】后，在此按下回车键继续。")
         print("="*50 + "\n")
         input(">>> 确认已登录后，请按【Enter】键继续：")
-        print("[*] 收到继续指令，重新校验状态...")
+        print("[*] 收到继续指令，准备切换后台模式...")
     else:
         print("[+] 登录态有效，准备进入工作流。")
 
@@ -154,7 +154,6 @@ async def process_single_task(context, page, product_id):
                 file_chooser = await fc_info.value
                 await file_chooser.set_files(downloaded_file_path)
                 
-                # 等待上传完成
                 await asyncio.sleep(8)
                 return "处理成功", f"文件 {os.path.basename(downloaded_file_path)} 回传完毕"
                 
@@ -166,13 +165,12 @@ async def process_single_task(context, page, product_id):
     except Exception as e:
         return "执行异常", f"未知错误: {str(e)[:50]}"
 
-
 async def main():
     print("===================================================")
-    print("      小满 CRM 自动化批处理系统 (v3.0)             ")
+    print("      小满 CRM 自动化批处理系统 (v3.0 - 智能版)    ")
     print("===================================================")
     
-    # 1. 检查任务文件
+    # 1. 检查并读取任务文件
     if not os.path.exists(TASK_FILE):
         with open(TASK_FILE, 'w', encoding='utf-8') as f:
             f.write("HBB6969\nHBB3721\n")
@@ -188,59 +186,71 @@ async def main():
         return
 
     print(f"[*] 读取到 {len(tasks)} 个待处理产品编号。")
-    
-    # 初始化报告数据结构
+
+    # ==========================================
+    # 第一阶段：有头模式 - 专职探路开门 (检查登录)
+    # ==========================================
+    async with async_playwright() as p:
+        print(f"[*] 正在启动【可见窗口】进行安全检查...")
+        login_context = await p.chromium.launch_persistent_context(
+            user_data_dir=USER_DATA_PATH, 
+            executable_path=EDGE_PATH,
+            headless=False,  # <--- 必须是 False，窗口才会弹出来
+            viewport={"width": 1280, "height": 720}, # <--- 强制窗口大小，防止幽灵折叠
+            args=["--no-first-run", "--disable-blink-features=AutomationControlled"]
+        )
+        login_page = login_context.pages[0]
+        
+        # 探测登录态，没登录就会停在这里等你
+        await check_login_status(login_page)
+        
+        print("[+] 探路完成，准备切换至静默挂机模式...")
+        await login_context.close()
+        await asyncio.sleep(2)
+
+    # ==========================================
+    # 第二阶段：无头模式 - 专职后台干活 (静默批处理)
+    # ==========================================
     report_data = []
     report_filename = f"执行报告_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     report_filepath = os.path.join(REPORT_DIR, report_filename)
 
-    # 2. 启动浏览器（全局复用）
     async with async_playwright() as p:
-        print(f"[*] 启动 Edge 自动化实例 (强制虚拟分辨率)...")
-        context = await p.chromium.launch_persistent_context(
+        print(f"[*] 启动【静默模式】开始 1080P 虚拟挂机...")
+        work_context = await p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_PATH, 
             executable_path=EDGE_PATH,
-            headless=True,  # 保持静默运行
-            # ========= 核心修改 =========
-            no_viewport=False, # 关闭无视口模式
-            viewport={"width": 1920, "height": 1080}, # 强制分配一个 1080P 的虚拟大屏
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0", # 伪装真实浏览器
-            # ============================
+            headless=True,  # <--- 必须是 True，后台默默运行不打扰你
+            viewport={"width": 1920, "height": 1080}, # <--- 锁定大屏视口，防止找不到按钮
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
             accept_downloads=True,
-            args=[
-                "--no-first-run", 
-                "--disable-blink-features=AutomationControlled"
-            ]
+            args=["--no-first-run", "--disable-blink-features=AutomationControlled"]
         )
-        page = context.pages[0]
-                
+        work_page = work_context.pages[0]
+        
         try:
-            # 3. 容灾：检查登录
-            await check_login_status(page)
-            
-            # 4. 批处理循环
             for idx, product_id in enumerate(tasks, 1):
                 print(f"\n>>> 进度: [{idx}/{len(tasks)}]")
-                status, msg = await process_single_task(context, page, product_id)
+                status, msg = await process_single_task(work_context, work_page, product_id)
                 
                 print(f"[{product_id}] 状态: {status} | 详情: {msg}")
                 
-                # 记录到报告
                 report_data.append({
                     "处理时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "产品编号": product_id,
                     "执行状态": status,
                     "详细信息": msg
                 })
-
         except KeyboardInterrupt:
             print("\n[!] 用户强制中止了批处理任务。")
         except Exception as global_err:
             print(f"\n[💥] 发生严重系统级错误: {global_err}")
         finally:
-            await context.close()
+            await work_context.close()
 
-    # 5. 生成巡检报告
+    # ==========================================
+    # 第三阶段：生成报告
+    # ==========================================
     print("\n===================================================")
     print("[*] 正在生成自动化巡检报告...")
     with open(report_filepath, 'w', newline='', encoding='utf-8-sig') as csvfile:
