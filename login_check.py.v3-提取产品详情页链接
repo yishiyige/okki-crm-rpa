@@ -1,0 +1,100 @@
+import asyncio
+import os
+import sys
+import re
+from playwright.async_api import async_playwright
+
+# ================= 配置区 =================
+EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+USER_DATA_PATH = os.path.join(os.environ['LOCALAPPDATA'], r"Microsoft\Edge\User Data\Automation")
+# ==========================================
+
+async def auto_clean_modals(page):
+    """自动清理弹窗"""
+    try:
+        await page.evaluate("""() => {
+            const selectors = ['.ant-modal-root', '.ant-modal-mask', '.xm-notification', '.ant-modal-wrap'];
+            selectors.forEach(s => {
+                const el = document.querySelector(s);
+                if(el) el.remove();
+            });
+            document.body.style.overflow = 'auto';
+        }""")
+    except: pass
+
+async def run_product_task(product_id):
+    async with async_playwright() as p:
+        print(f"[*] 启动 Edge 自动化实例...")
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=USER_DATA_PATH, executable_path=EDGE_PATH,
+            headless=False, no_viewport=True,
+            args=["--no-first-run", "--disable-blink-features=AutomationControlled"]
+        )
+        page = context.pages[0]
+        
+        try:
+            # 1. 访问并清理
+            print(f"[*] 正在打开产品管理页面...")
+            await page.goto("https://crm.xiaoman.cn/product", wait_until="commit")
+            await asyncio.sleep(2)
+            await auto_clean_modals(page)
+
+            # 2. 精确搜索
+            print(f"[*] 正在执行精确搜索: {product_id}")
+            search_input = page.locator(".ow-fixed-render-name-inner", has_text="编号/型号/名称").first
+            await search_input.click()
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
+            await page.keyboard.type(product_id)
+            await page.keyboard.press("Enter")
+
+            # 3. 盲狙法 + JS 强杀点击
+            print(f"[*] 等待列表刷新加载 (3秒)...")
+            await asyncio.sleep(3) 
+            
+            print(f"[*] 锁定第一个产品链接并强制触发点击...")
+            target_link = page.locator(".product-name-link").first
+            
+            # 【关键修改 1】不等待 visible，只等待 attached（只要它在代码里存在就行）
+            await target_link.wait_for(state="attached", timeout=10000)
+
+            href = None
+            try:
+                # 【关键修改 2】使用 JS 强行点击，无视遮挡、视口和滚动条问题
+                async with context.expect_page(timeout=10000) as new_page_info:
+                    await target_link.evaluate("el => el.click()")
+                
+                new_page = await new_page_info.value
+                href = new_page.url
+                print(f"[+] 成功通过 JS 拦截到新标签页 URL: {href}")
+                await new_page.close()
+                
+            except Exception as click_err:
+                print(f"[!] JS 点击拦截失败，尝试提取属性: {click_err}")
+                href = await target_link.get_attribute("href")
+
+            # 4. URL 转换与跳转
+            if href:
+                final_url = re.sub(r"tab=[^&]+", "tab=inquiryHistoryTabPane", href)
+                if "tab=" not in final_url:
+                    final_url += ("&" if "?" in final_url else "?") + "tab=inquiryHistoryTabPane"
+                
+                print(f"[+] 正在主页面跳转至目标详情页: {final_url}")
+                await page.goto(final_url)
+                
+                await asyncio.sleep(3)
+                await auto_clean_modals(page)
+                print(f"[SUCCESS] 任务完成：已成功进入 {product_id} 的询价历史页。")
+                await asyncio.sleep(10)
+            else:
+                raise Exception("执行了点击，但未能获取到任何有效的 href。")
+
+        except Exception as e:
+            print(f"[ERROR] 任务失败: {e}")
+            await page.screenshot(path="js_click_error.png")
+        finally:
+            await context.close()
+
+if __name__ == "__main__":
+    target = sys.argv[1] if len(sys.argv) > 1 else "HBB6969"
+    asyncio.run(run_product_task(target))
