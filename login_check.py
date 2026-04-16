@@ -209,7 +209,7 @@ async def process_single_task(context, page, product_id):
 
 async def main():
     print("===================================================")
-    print("      小满 CRM 自动化批处理系统 (v3.0 - 智能版)    ")
+    print("      小满 CRM 自动化批处理系统 (v3.2 - 智能版)    ")
     print("===================================================")
     
     # 1. 检查并读取任务文件
