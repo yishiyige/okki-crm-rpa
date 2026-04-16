@@ -102,7 +102,7 @@ async def process_single_task(context, page, product_id):
         if not has_history:
             return "无询价历史", "产品详情页判定无记录"
 
-        # 4. 下载附件
+	# 4. 下载附件 (智能身份甄别版 - 冷烟业务规则)
         jump_icon = page.locator(".jump-link .new-tab-icon").first
         downloaded_file_path = None
         
@@ -112,30 +112,72 @@ async def process_single_task(context, page, product_id):
             
             task_page = await task_page_info.value
             await task_page.wait_for_load_state("domcontentloaded")
-            await asyncio.sleep(4) 
             
-            found_dl = await task_page.evaluate("""() => {
-                const nodes = Array.from(document.querySelectorAll('a, span, button'));
-                const btn = nodes.find(n => n.innerText && n.innerText.trim() === '下载');
-                if (btn) { btn.id = 'final-download-node'; return true; }
+            print(f"[*] 正在进行业务身份甄别与附件探查...")
+            
+            # 使用 JS 植入冷烟的“方案2：身份甄别”逻辑
+            found_dl = await task_page.evaluate("""async () => {
+                for(let i=0; i<15; i++) {
+                    // 抓取所有的文件行
+                    const rows = Array.from(document.querySelectorAll('.vue-recycle-scroller__item-view .row-item'));
+                    
+                    if (rows.length > 1) {
+                        // 1. 获取最底部(最老)附件的上传人，作为“原创建人/业务员”的基准
+                        const creatorNode = rows[rows.length - 1].querySelector('[data-cci="2"] span');
+                        const creatorName = creatorNode ? creatorNode.innerText.trim() : '';
+                        
+                        if (creatorName) {
+                            // 2. 从顶部(最新)往下扫描
+                            for(let j = 0; j < rows.length; j++) {
+                                const row = rows[j];
+                                const uploaderNode = row.querySelector('[data-cci="2"] span');
+                                const uploaderName = uploaderNode ? uploaderNode.innerText.trim() : '';
+                                
+                                // 3. 核心逻辑：如果当前文件的上传人 不是 创建人，说明这是采购的报价！
+                                if (uploaderName && uploaderName !== creatorName) {
+                                    // 在这行里寻找下载按钮
+                                    const btns = Array.from(row.querySelectorAll('button'));
+                                    const dlBtn = btns.find(b => b.innerText.trim() === '下载' || b.innerText.trim() === '下载附件');
+                                    
+                                    if (dlBtn && dlBtn.offsetWidth > 0) {
+                                        dlBtn.id = 'final-download-node';
+                                        return true; // 锁定目标，允许下载
+                                    }
+                                }
+                            }
+                        }
+                    } else if (rows.length === 1) {
+                        // 只有 1 个文件，必然是业务员自己的，直接退出跳过
+                        return false; 
+                    }
+                    
+                    await new Promise(r => setTimeout(r, 1000)); // 没找到就等1秒再找，最多15秒
+                }
                 return false;
             }""")
 
             if found_dl:
-                async with task_page.expect_download(timeout=30000) as download_info:
-                    await task_page.locator("#final-download-node").click(force=True)
-                download = await download_info.value
-                original_filename = download.suggested_filename
-                downloaded_file_path = os.path.join(DOWNLOAD_DIR, original_filename)
-                await download.save_as(downloaded_file_path)
+                try:
+                    async with task_page.expect_download(timeout=20000) as download_info:
+                        await task_page.locator("#final-download-node").click(force=True)
+                    download = await download_info.value
+                    original_filename = download.suggested_filename
+                    downloaded_file_path = os.path.join(DOWNLOAD_DIR, original_filename)
+                    await download.save_as(downloaded_file_path)
+                except Exception as dl_err:
+                    error_shot_path = os.path.join(REPORT_DIR, f"下载流异常_{product_id}.png")
+                    await task_page.screenshot(path=error_shot_path, full_page=True)
+                    await task_page.close()
+                    return "下载流异常", f"点击了有效报价附件，但未触发下载流"
             else:
+                # 没找到符合条件的按钮（比如只有业务员的原文件，或者采购还没回复）
                 await task_page.close()
-                return "无Excel附件", "任务页无下载按钮"
+                return "等待报价中", "未检测到非本人的回复附件，已跳过"
             
             await task_page.close()
         except Exception as task_err:
-            return "下载失败", f"抓取任务页失败: {str(task_err)[:50]}"
-
+            return "抓取异常", f"任务页流转失败: {str(task_err)[:50]}"
+                        
         # 5. 回传附件
         if downloaded_file_path and os.path.exists(downloaded_file_path):
             attachment_url = final_url.replace("tab=inquiryHistoryTabPane", "tab=attachmentTabPane")
